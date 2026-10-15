@@ -6,3 +6,4 @@ python-dotenv>=1.0.0
 openai>=1.0.0
 google-genai>=1.0.0
 pywebpush>=2.1.2
+gunicorn
