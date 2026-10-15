@@ -3,6 +3,7 @@ Django settings for chatpartner project.
 """
 from pathlib import Path
 import os
+import dj_database_url
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -71,17 +72,56 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 ASGI_APPLICATION = 'config.asgi.application'
 
-# Database configuration (PostgreSQL backed with environment variables)
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'chatpartner_db'),
-        'USER': os.getenv('DB_USER', 'ashique'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'ashique@123'),
-        'HOST': os.getenv('DB_HOST', '127.0.0.1'),
-        'PORT': os.getenv('DB_PORT', '5433'),
+# Database configuration: Supports Neon PostgreSQL via DATABASE_URL and local fallback
+def get_database_config(database_url=None, env=None):
+    """
+    Builds Django DATABASES configuration dictionary.
+    Prioritizes DATABASE_URL (for Neon/production) with secure SSL enforcement.
+    Falls back to individual local DB environment variables when DATABASE_URL is absent.
+    Credentials are read from environment variables only (no hardcoded password fallback).
+    """
+    env_lookup = (lambda k, default='': env.get(k, default)) if env is not None else os.getenv
+    raw_url = database_url if database_url is not None else env_lookup('DATABASE_URL', '')
+    db_url = (raw_url or '').strip()
+
+    if db_url:
+        ssl_require = str(env_lookup('DB_SSL_REQUIRE', 'True')).lower() in ('true', '1', 't')
+        conn_max_age_val = env_lookup('DB_CONN_MAX_AGE', '600')
+        try:
+            conn_max_age = int(conn_max_age_val)
+        except (ValueError, TypeError):
+            conn_max_age = 600
+
+        config = dj_database_url.parse(
+            db_url,
+            conn_max_age=conn_max_age,
+            conn_health_checks=True,
+            ssl_require=ssl_require,
+        )
+        if ssl_require:
+            config.setdefault('OPTIONS', {})
+            config['OPTIONS'].setdefault('sslmode', 'require')
+        return {'default': config}
+
+    db_options = {}
+    ssl_mode = env_lookup('DB_SSLMODE', '')
+    if ssl_mode:
+        db_options['sslmode'] = ssl_mode
+
+    return {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env_lookup('DB_NAME', 'chatpartner_db'),
+            'USER': env_lookup('DB_USER', 'ashique'),
+            'PASSWORD': env_lookup('DB_PASSWORD', ''),
+            'HOST': env_lookup('DB_HOST', '127.0.0.1'),
+            'PORT': env_lookup('DB_PORT', '5433'),
+            'OPTIONS': db_options,
+        }
     }
-}
+
+
+DATABASES = get_database_config()
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

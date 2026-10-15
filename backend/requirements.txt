@@ -7,3 +7,5 @@ openai>=1.0.0
 google-genai>=1.0.0
 pywebpush>=2.1.2
 gunicorn
+dj-database-url>=2.1.0
+edge-tts>=7.0.0

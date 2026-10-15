@@ -3735,6 +3735,83 @@ class VoiceServiceUnitTests(TestCase):
         self.assertIn("exceeds the allowed limit", str(ctx.exception))
 
 
+from config.settings import get_database_config
+
+
+class DatabaseConfigurationTests(TestCase):
+    """
+    Tests for Django database configuration:
+    - Neon PostgreSQL DATABASE_URL parsing and sslmode=require enforcement
+    - Local development fallback using individual DB_* environment variables
+    - Removal of hardcoded password fallback
+    - Custom connection parameters (CONN_MAX_AGE, DB_SSL_REQUIRE)
+    """
+
+    def test_neon_database_url_configuration_with_ssl_require(self):
+        neon_url = "postgresql://neondb_owner:npg_secret123@ep-cool-mountain-999.us-east-2.aws.neon.tech/neondb?sslmode=require"
+        cfg = get_database_config(database_url=neon_url)
+
+        self.assertIn('default', cfg)
+        default_db = cfg['default']
+        self.assertEqual(default_db['ENGINE'], 'django.db.backends.postgresql')
+        self.assertEqual(default_db['NAME'], 'neondb')
+        self.assertEqual(default_db['USER'], 'neondb_owner')
+        self.assertEqual(default_db['PASSWORD'], 'npg_secret123')
+        self.assertEqual(default_db['HOST'], 'ep-cool-mountain-999.us-east-2.aws.neon.tech')
+        self.assertEqual(default_db['OPTIONS'].get('sslmode'), 'require')
+        self.assertEqual(default_db.get('CONN_MAX_AGE'), 600)
+        self.assertTrue(default_db.get('CONN_HEALTH_CHECKS'))
+
+    def test_neon_database_url_without_explicit_query_enforces_ssl(self):
+        neon_url = "postgresql://neondb_owner:npg_secret123@ep-cool-mountain-999.us-east-2.aws.neon.tech/neondb"
+        cfg = get_database_config(database_url=neon_url)
+
+        default_db = cfg['default']
+        self.assertEqual(default_db['OPTIONS'].get('sslmode'), 'require')
+
+    def test_local_database_fallback_when_database_url_absent(self):
+        mock_env = {
+            'DB_NAME': 'local_test_db',
+            'DB_USER': 'local_developer',
+            'DB_PASSWORD': 'local_secret_pass',
+            'DB_HOST': 'localhost',
+            'DB_PORT': '5432',
+        }
+        cfg = get_database_config(database_url="", env=mock_env)
+
+        default_db = cfg['default']
+        self.assertEqual(default_db['ENGINE'], 'django.db.backends.postgresql')
+        self.assertEqual(default_db['NAME'], 'local_test_db')
+        self.assertEqual(default_db['USER'], 'local_developer')
+        self.assertEqual(default_db['PASSWORD'], 'local_secret_pass')
+        self.assertEqual(default_db['HOST'], 'localhost')
+        self.assertEqual(default_db['PORT'], '5432')
+
+    def test_no_hardcoded_password_fallback_when_password_env_absent(self):
+        mock_env = {
+            'DB_NAME': 'chatpartner_db',
+            'DB_USER': 'ashique',
+        }
+        cfg = get_database_config(database_url="", env=mock_env)
+
+        default_db = cfg['default']
+        self.assertEqual(default_db['PASSWORD'], '')
+        self.assertNotEqual(default_db['PASSWORD'], 'ashique@123')
+
+    def test_custom_conn_max_age_and_ssl_override(self):
+        neon_url = "postgresql://user:pass@endpoint.neon.tech/neondb"
+        mock_env = {
+            'DB_CONN_MAX_AGE': '300',
+            'DB_SSL_REQUIRE': 'False',
+        }
+        cfg = get_database_config(database_url=neon_url, env=mock_env)
+
+        default_db = cfg['default']
+        self.assertEqual(default_db.get('CONN_MAX_AGE'), 300)
+        self.assertNotIn('sslmode', default_db.get('OPTIONS', {}))
+
+
+
 
 
 
