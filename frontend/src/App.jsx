@@ -63,6 +63,8 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const menuRef = useRef(null);
+  const isSubmittingRef = useRef(false);
+
 
   // Scroll to bottom on messages change
   const scrollToBottom = () => {
@@ -169,6 +171,7 @@ export default function App() {
         audioUrl: m.audio_url || null,
         audioDuration: m.audio_duration || null,
         timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: 'sent',
       }));
       setMessages(formatted);
     } catch (err) {
@@ -181,37 +184,51 @@ export default function App() {
   };
 
   // Lightweight background sync on window focus and periodic interval
-  // Does NOT overwrite unsent inputText or disrupt scrolling while user is typing
+  // Does NOT overwrite pending optimistic messages or unsent inputText
   useEffect(() => {
     if (!currentUser || !currentConversationId) return;
 
     let isMounted = true;
 
     const refreshSilently = async () => {
+      // Never perform background refresh while a message is being sent or awaiting response
+      if (isSubmittingRef.current || isLoading) return;
+
       try {
         const convData = await getConversation(currentConversationId);
         if (!isMounted || !convData || !convData.messages) return;
 
         setMessages((prev) => {
-          const newMsgs = convData.messages;
-          const hasLengthChanged = newMsgs.length !== prev.length;
-          const hasLastIdChanged =
-            newMsgs.length > 0 &&
-            prev.length > 0 &&
-            String(newMsgs[newMsgs.length - 1].id) !== String(prev[prev.length - 1].id);
+          // Never overwrite if any message is actively in flight
+          const hasInFlight = prev.some((m) => m.status === 'sending');
+          if (hasInFlight) return prev;
 
-          if (hasLengthChanged || hasLastIdChanged) {
-            return newMsgs.map((m) => ({
-              id: m.id,
-              sender: m.sender,
-              text: m.content,
-              messageType: m.message_type || 'text',
-              audioUrl: m.audio_url || null,
-              audioDuration: m.audio_duration || null,
-              timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            }));
+          const newMsgs = convData.messages;
+          const pendingFailed = prev.filter((m) => m.status === 'failed');
+
+          // If no pending failed messages and counts & last ID match, skip re-render
+          if (
+            pendingFailed.length === 0 &&
+            newMsgs.length === prev.length &&
+            newMsgs.length > 0 &&
+            String(newMsgs[newMsgs.length - 1].id) === String(prev[prev.length - 1].id)
+          ) {
+            return prev;
           }
-          return prev;
+
+          const serverFormatted = newMsgs.map((m) => ({
+            id: m.id,
+            sender: m.sender,
+            text: m.content,
+            messageType: m.message_type || 'text',
+            audioUrl: m.audio_url || null,
+            audioDuration: m.audio_duration || null,
+            timestamp: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            status: 'sent',
+          }));
+
+          // Preserve any failed messages at the end so retry is not lost
+          return [...serverFormatted, ...pendingFailed];
         });
       } catch {
         // Silently suppress background refresh errors so typing is never interrupted
@@ -222,15 +239,15 @@ export default function App() {
       refreshSilently();
     };
     window.addEventListener('focus', handleFocus);
-    // Poll every 6 seconds so proactive check-ins appear without manual page refresh
-    const interval = setInterval(refreshSilently, 6000);
+    // Poll every 8 seconds so proactive check-ins appear without manual page refresh
+    const interval = setInterval(refreshSilently, 8000);
 
     return () => {
       isMounted = false;
       window.removeEventListener('focus', handleFocus);
       clearInterval(interval);
     };
-  }, [currentUser, currentConversationId]);
+  }, [currentUser, currentConversationId, isLoading]);
 
   // Proactive settings handlers
   const handleOpenProactiveSettings = async () => {
@@ -343,16 +360,22 @@ export default function App() {
     if (e) e.preventDefault();
 
     const trimmed = inputText.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || isSubmittingRef.current || isLoading) return;
 
-    // Optimistic user message bubble
+    // Synchronous submit lock preventing rapid duplicate submissions
+    isSubmittingRef.current = true;
+
+    // Unique temporary ID for the optimistic message
+    const tempId = `client-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const userMsg = {
-      id: `user-${Date.now()}`,
+      id: tempId,
       sender: 'user',
       text: trimmed,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'sending',
     };
 
+    // Immediately render outgoing message, clear composer, and show typing indicator
     setMessages((prev) => [...prev, userMsg]);
     setInputText('');
     setErrorMessage(null);
@@ -367,17 +390,32 @@ export default function App() {
         localStorage.setItem('chatpartner_active_conv_id', data.conversation_id);
       }
 
-      const companionMsg = {
-        id: data.message_id || `ami-${Date.now()}`,
-        sender: 'companion',
-        text: data.reply,
-        timestamp: new Date(data.timestamp || Date.now()).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-      };
+      // Reconcile optimistic user message with server ID and status, then append companion reply
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
+          m.id === tempId
+            ? {
+                ...m,
+                id: data.user_message_id || m.id,
+                status: 'sent',
+              }
+            : m
+        );
 
-      setMessages((prev) => [...prev, companionMsg]);
+        const companionMsg = {
+          id: data.message_id || `ami-${Date.now()}`,
+          sender: 'companion',
+          text: data.reply,
+          timestamp: new Date(data.timestamp || Date.now()).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          status: 'sent',
+        };
+
+        return [...updated, companionMsg];
+      });
+
       setApiConnected(true);
     } catch (err) {
       if (err.status === 503 || err.message?.toLowerCase().includes('not configured')) {
@@ -386,15 +424,95 @@ export default function App() {
       if (!handleAuthError(err)) {
         setErrorMessage(err.message || 'Failed to send message. Please try again.');
       }
+      // Preserve message in chat marked as failed rather than losing it
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempId
+            ? { ...m, status: 'failed', errorMessage: err.message }
+            : m
+        )
+      );
     } finally {
       setIsLoading(false);
+      isSubmittingRef.current = false;
+    }
+  };
+
+  const handleRetryMessage = async (messageId) => {
+    const failedMsg = messages.find((m) => m.id === messageId);
+    if (!failedMsg || isSubmittingRef.current || isLoading) return;
+
+    const trimmed = failedMsg.text;
+    if (!trimmed) return;
+
+    isSubmittingRef.current = true;
+    setIsLoading(true);
+    setErrorMessage(null);
+
+    // Update message status back to sending
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId ? { ...m, status: 'sending', errorMessage: null } : m
+      )
+    );
+
+    try {
+      const data = await sendChatMessage(trimmed, currentConversationId);
+
+      if (!currentConversationId && data.conversation_id) {
+        setCurrentConversationId(data.conversation_id);
+        localStorage.setItem('chatpartner_active_conv_id', data.conversation_id);
+      }
+
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                id: data.user_message_id || m.id,
+                status: 'sent',
+              }
+            : m
+        );
+
+        const companionMsg = {
+          id: data.message_id || `ami-${Date.now()}`,
+          sender: 'companion',
+          text: data.reply,
+          timestamp: new Date(data.timestamp || Date.now()).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          status: 'sent',
+        };
+
+        return [...updated, companionMsg];
+      });
+
+      setApiConnected(true);
+    } catch (err) {
+      if (err.status === 503 || err.message?.toLowerCase().includes('not configured')) {
+        setApiConnected(false);
+      }
+      if (!handleAuthError(err)) {
+        setErrorMessage(err.message || 'Failed to send message. Please retry.');
+      }
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, status: 'failed', errorMessage: err.message } : m
+        )
+      );
+    } finally {
+      setIsLoading(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleSendVoice = async (audioBlob, duration) => {
-    if (isLoading) return;
+    if (isSubmittingRef.current || isLoading) return;
 
-    const tempId = `voice-${Date.now()}`;
+    isSubmittingRef.current = true;
+    const tempId = `voice-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const userMsg = {
       id: tempId,
       sender: 'user',
@@ -403,6 +521,7 @@ export default function App() {
       audioDuration: duration,
       text: '🎤 Voice message (transcribing...)',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      status: 'sending',
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -422,8 +541,8 @@ export default function App() {
         localStorage.setItem('chatpartner_active_conv_id', data.conversation_id);
       }
 
-      setMessages((prev) =>
-        prev.map((m) =>
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
           m.id === tempId
             ? {
                 ...m,
@@ -431,25 +550,28 @@ export default function App() {
                 text: data.user_transcript || m.text,
                 audioUrl: data.user_audio_url || m.audioUrl,
                 audioDuration: data.user_audio_duration || m.audioDuration,
+                status: 'sent',
               }
             : m
-        )
-      );
+        );
 
-      const companionMsg = {
-        id: data.message_id || `ami-${Date.now()}`,
-        sender: 'companion',
-        messageType: 'voice',
-        text: data.reply,
-        audioUrl: data.audio_url || null,
-        audioDuration: data.audio_duration || null,
-        timestamp: new Date(data.timestamp || Date.now()).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-      };
+        const companionMsg = {
+          id: data.message_id || `ami-${Date.now()}`,
+          sender: 'companion',
+          messageType: 'voice',
+          text: data.reply,
+          audioUrl: data.audio_url || null,
+          audioDuration: data.audio_duration || null,
+          timestamp: new Date(data.timestamp || Date.now()).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          status: 'sent',
+        };
 
-      setMessages((prev) => [...prev, companionMsg]);
+        return [...updated, companionMsg];
+      });
+
       setApiConnected(true);
     } catch (err) {
       if (err.status === 503 || err.message?.toLowerCase().includes('not configured')) {
@@ -461,12 +583,13 @@ export default function App() {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === tempId
-            ? { ...m, text: '⚠️ Failed to send voice message' }
+            ? { ...m, text: '⚠️ Failed to send voice message', status: 'failed', errorMessage: err.message }
             : m
         )
       );
     } finally {
       setIsLoading(false);
+      isSubmittingRef.current = false;
     }
   };
 
@@ -926,15 +1049,34 @@ export default function App() {
                       </div>
                     )}
 
-                    {msg.timestamp && (
-                      <span
-                        className={`block text-[10px] mt-1 select-none text-right ${
-                          isUser ? 'text-purple-200/80' : 'text-slate-400'
-                        }`}
-                      >
-                        {msg.timestamp}
-                      </span>
-                    )}
+                    <div className="flex items-center justify-end gap-1.5 mt-1 select-none text-[10px]">
+                      {isUser && msg.status === 'sending' && (
+                        <span className="inline-flex items-center gap-1 text-purple-200/70 font-light" title="Sending...">
+                          <svg className="w-2.5 h-2.5 animate-spin text-purple-200" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                          </svg>
+                          <span>Sending</span>
+                        </span>
+                      )}
+                      {isUser && msg.status === 'failed' && (
+                        <span className="inline-flex items-center gap-1 text-red-300 font-medium">
+                          <span>Not sent</span>
+                          <button
+                            type="button"
+                            onClick={() => handleRetryMessage(msg.id)}
+                            className="underline text-purple-200 hover:text-white transition cursor-pointer font-semibold ml-0.5"
+                          >
+                            Retry
+                          </button>
+                        </span>
+                      )}
+                      {msg.timestamp && (
+                        <span className={isUser ? 'text-purple-200/80' : 'text-slate-400'}>
+                          {msg.timestamp}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

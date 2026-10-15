@@ -194,6 +194,7 @@ def chat_endpoint(request):
                 "conversation_id": str(conversation.id),
                 "mood": new_mood,
                 "message_id": str(companion_msg.id),
+                "user_message_id": str(user_msg.id),
                 "timestamp": companion_msg.created_at.isoformat(),
                 "metadata": {
                     "provider": metadata.get("provider", "openai"),

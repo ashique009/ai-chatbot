@@ -322,6 +322,8 @@ class ChatPersistenceAndMemoryTest(TestCase):
         data = response.json()
         self.assertIn('conversation_id', data)
         self.assertIn('reply', data)
+        self.assertIn('user_message_id', data)
+        self.assertIn('message_id', data)
 
         conv_id = data['conversation_id']
         conversation = Conversation.objects.get(id=conv_id)
