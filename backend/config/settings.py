@@ -214,15 +214,25 @@ CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(',')
 CORS_ALLOW_CREDENTIALS = True
 
 # CSRF and Session Security Configuration for React Single-Page Application
-CSRF_COOKIE_HTTPONLY = False  # Allows frontend client to read csrftoken cookie
+IS_PROD = not DEBUG
+
+CSRF_COOKIE_HTTPONLY = False  # Allows frontend client to read csrftoken cookie if same-origin
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_HEADER_NAME = 'HTTP_X_CSRFTOKEN'
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SAMESITE = 'Lax'
+
+SESSION_COOKIE_SAMESITE = 'None' if IS_PROD else 'Lax'
+CSRF_COOKIE_SAMESITE = 'None' if IS_PROD else 'Lax'
+SESSION_COOKIE_SECURE = IS_PROD
+CSRF_COOKIE_SECURE = IS_PROD
+
+if IS_PROD:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 CSRF_TRUSTED_ORIGINS = [
     origin for origin in CORS_ALLOWED_ORIGINS
     if origin.startswith('http://') or origin.startswith('https://')
 ]
+
 
 
 

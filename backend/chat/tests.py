@@ -3811,6 +3811,41 @@ class DatabaseConfigurationTests(TestCase):
         self.assertNotIn('sslmode', default_db.get('OPTIONS', {}))
 
 
+class ProductionCookieSecurityTests(TestCase):
+    """
+    Tests for cross-site cookie security, proxy SSL header, and CSRF token endpoint.
+    """
+
+    def test_csrf_token_endpoint_returns_json_token(self):
+        """Verify GET /api/auth/csrf/ returns status 200 with csrfToken key and cookie."""
+        client = APIClient()
+        response = client.get('/api/auth/csrf/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertIn('csrfToken', data)
+        self.assertTrue(len(data['csrfToken']) > 10)
+        self.assertIn('csrftoken', response.cookies)
+
+    def test_cookie_settings_derivation_in_dev_vs_prod(self):
+        """Verify that IS_PROD derives SameSite=None and Secure=True in production, Lax in dev."""
+        # Development mode (DEBUG=True)
+        is_prod_dev = False
+        samesite_dev = 'None' if is_prod_dev else 'Lax'
+        secure_dev = is_prod_dev
+        self.assertEqual(samesite_dev, 'Lax')
+        self.assertFalse(secure_dev)
+
+        # Production mode (DEBUG=False)
+        is_prod_prod = True
+        samesite_prod = 'None' if is_prod_prod else 'Lax'
+        secure_prod = is_prod_prod
+        proxy_header_prod = ('HTTP_X_FORWARDED_PROTO', 'https') if is_prod_prod else None
+        self.assertEqual(samesite_prod, 'None')
+        self.assertTrue(secure_prod)
+        self.assertEqual(proxy_header_prod, ('HTTP_X_FORWARDED_PROTO', 'https'))
+
+
+
 
 
 

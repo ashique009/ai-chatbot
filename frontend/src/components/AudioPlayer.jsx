@@ -11,6 +11,37 @@ function formatTime(seconds) {
 }
 
 /**
+ * Safely resolves an audio URL, handling relative paths and preventing
+ * duplicate /api/api/ path segments whether running against a full backend URL
+ * or a local/reverse proxy /api endpoint.
+ */
+export function resolveAudioUrl(audioUrl) {
+  if (!audioUrl) return null;
+  if (audioUrl.startsWith('http://') || audioUrl.startsWith('https://') || audioUrl.startsWith('blob:')) {
+    return audioUrl;
+  }
+  const rawBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+  const baseUrl = rawBase.replace(/\/+$/, '');
+
+  if (baseUrl.startsWith('http://') || baseUrl.startsWith('https://')) {
+    try {
+      const parsedBase = new URL(baseUrl);
+      if (audioUrl.startsWith('/api')) {
+        return `${parsedBase.origin}${audioUrl}`;
+      }
+      return `${baseUrl}${audioUrl.startsWith('/') ? '' : '/'}${audioUrl}`;
+    } catch {
+      // Fall through to relative handling
+    }
+  }
+
+  if (audioUrl.startsWith('/api')) {
+    return audioUrl;
+  }
+  return `${baseUrl}${audioUrl.startsWith('/') ? '' : '/'}${audioUrl}`;
+}
+
+/**
  * Reusable, authenticated audio player for voice notes.
  * Supports both recorded Blobs and authenticated streaming URLs.
  */
@@ -74,10 +105,9 @@ export default function AudioPlayer({
     setIsLoadingAudio(true);
     setLoadError(null);
     try {
-      // Securely fetch with session credentials
-      const fullUrl = audioUrl.startsWith('http')
-        ? audioUrl
-        : `${import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'}${audioUrl.startsWith('/') ? '' : '/'}${audioUrl}`;
+      // Securely fetch with session credentials using resolved URL
+      const fullUrl = resolveAudioUrl(audioUrl);
+      if (!fullUrl) return null;
 
       const res = await fetch(fullUrl, {
         credentials: 'include',

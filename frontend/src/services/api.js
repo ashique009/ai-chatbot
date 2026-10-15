@@ -1,24 +1,14 @@
 /**
  * API client configuration and companion endpoints.
- * Includes session credentials, CSRF token handling, and authentication error handling.
+ * Includes session credentials, in-memory CSRF token handling, and authentication error handling.
  */
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+export const API_BASE_URL = RAW_API_BASE_URL.replace(/\/+$/, '');
 
 let cachedCsrfToken = null;
 
 /**
- * Reads a cookie value by name from the browser document.
- */
-function getCookie(name) {
-  if (typeof document === 'undefined') return null;
-  const value = `; ${document.cookie}`;
-  const parts = value.split(`; ${name}=`);
-  if (parts.length === 2) return parts.pop().split(';').shift();
-  return null;
-}
-
-/**
- * Fetches and caches the CSRF token from Django.
+ * Fetches and caches the CSRF token from Django backend into memory.
  */
 export async function fetchCsrfToken() {
   try {
@@ -29,26 +19,29 @@ export async function fetchCsrfToken() {
     });
     if (response.ok) {
       const data = await response.json();
-      cachedCsrfToken = data.csrfToken;
+      if (data?.csrfToken) {
+        cachedCsrfToken = data.csrfToken;
+      }
       return cachedCsrfToken;
     }
-  } catch {
-    // Fall back to cookie reading
+  } catch (err) {
+    // Gracefully capture network errors without uncaught promise rejection
+    console.warn('Failed to fetch CSRF token:', err);
   }
-  return getCookie('csrftoken');
+  return cachedCsrfToken;
 }
 
 /**
- * Returns the active CSRF token.
+ * Returns the active CSRF token from in-memory cache.
  */
 export function getCsrfToken() {
-  return getCookie('csrftoken') || cachedCsrfToken;
+  return cachedCsrfToken;
 }
 
 /**
  * Wraps native fetch with credentials: 'include' and automatic CSRF headers.
  */
-async function secureFetch(endpoint, options = {}) {
+export async function secureFetch(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
   const headers = {
     'Accept': 'application/json',
@@ -57,6 +50,9 @@ async function secureFetch(endpoint, options = {}) {
 
   const method = (options.method || 'GET').toUpperCase();
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    if (!cachedCsrfToken) {
+      await fetchCsrfToken();
+    }
     const csrfToken = getCsrfToken();
     if (csrfToken) {
       headers['X-CSRFToken'] = csrfToken;
@@ -77,6 +73,7 @@ async function secureFetch(endpoint, options = {}) {
 // ============================================================================
 
 export async function loginUser(username, password) {
+  // Ensure we have a fresh CSRF token prior to authentication attempt
   await fetchCsrfToken();
   const response = await secureFetch('/auth/login/', {
     method: 'POST',
@@ -86,7 +83,10 @@ export async function loginUser(username, password) {
 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(data?.error || `Login failed (${response.status})`);
+    const errorMsg = data?.error || `Login failed (${response.status})`;
+    const err = new Error(errorMsg);
+    err.status = response.status;
+    throw err;
   }
   if (data?.csrfToken) {
     cachedCsrfToken = data.csrfToken;
@@ -95,6 +95,7 @@ export async function loginUser(username, password) {
 }
 
 export async function registerUser(username, password, email = '') {
+  // Ensure we have a fresh CSRF token prior to registration attempt
   await fetchCsrfToken();
   const response = await secureFetch('/auth/register/', {
     method: 'POST',
@@ -104,7 +105,10 @@ export async function registerUser(username, password, email = '') {
 
   const data = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(data?.error || `Registration failed (${response.status})`);
+    const errorMsg = data?.error || `Registration failed (${response.status})`;
+    const err = new Error(errorMsg);
+    err.status = response.status;
+    throw err;
   }
   if (data?.csrfToken) {
     cachedCsrfToken = data.csrfToken;

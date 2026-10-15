@@ -99,7 +99,7 @@ export default function App() {
       .catch(() => {
         setApiConnected(false);
       });
-    fetchCsrfToken();
+    fetchCsrfToken().catch(() => {});
 
     getCurrentUser()
       .then((user) => {
