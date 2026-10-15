@@ -1,0 +1,32 @@
+# Environment and Secret files
+.env
+.env.*
+!.env.example
+*.local
+
+# Python / Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+.venv/
+venv/
+env/
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.npm
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
