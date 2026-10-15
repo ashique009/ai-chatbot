@@ -214,24 +214,42 @@ CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(',')
 CORS_ALLOW_CREDENTIALS = True
 
 # CSRF and Session Security Configuration for React Single-Page Application
-IS_PROD = not DEBUG
+# Detect production / hosted environment (Render sets RENDER=true automatically)
+IS_RENDER = os.getenv('RENDER', '').lower() in ('true', '1') or bool(os.getenv('RENDER_SERVICE_ID')) or bool(os.getenv('RENDER_EXTERNAL_HOSTNAME'))
+IS_PROD = (not DEBUG) or IS_RENDER or os.getenv('ENVIRONMENT', '').lower() in ('production', 'prod')
 
 CSRF_COOKIE_HTTPONLY = False  # Allows frontend client to read csrftoken cookie if same-origin
 CSRF_COOKIE_NAME = 'csrftoken'
 CSRF_HEADER_NAME = 'HTTP_X_CSRFTOKEN'
 
-SESSION_COOKIE_SAMESITE = 'None' if IS_PROD else 'Lax'
-CSRF_COOKIE_SAMESITE = 'None' if IS_PROD else 'Lax'
-SESSION_COOKIE_SECURE = IS_PROD
-CSRF_COOKIE_SECURE = IS_PROD
+# In cross-site production deployments (e.g. Vercel frontend <-> Render backend),
+# cookies MUST be SameSite=None and Secure=True, otherwise browsers block or drop them.
+default_samesite = 'None' if IS_PROD else 'Lax'
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', default_samesite)
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', default_samesite)
 
-if IS_PROD:
+# Browser specifications require Secure=True whenever SameSite=None
+default_session_secure = True if (IS_PROD or str(SESSION_COOKIE_SAMESITE).lower() == 'none') else False
+session_secure_env = os.getenv('SESSION_COOKIE_SECURE')
+SESSION_COOKIE_SECURE = session_secure_env.lower() in ('true', '1', 't') if session_secure_env is not None else default_session_secure
+
+default_csrf_secure = True if (IS_PROD or str(CSRF_COOKIE_SAMESITE).lower() == 'none') else False
+csrf_secure_env = os.getenv('CSRF_COOKIE_SECURE')
+CSRF_COOKIE_SECURE = csrf_secure_env.lower() in ('true', '1', 't') if csrf_secure_env is not None else default_csrf_secure
+
+# SECURE_PROXY_SSL_HEADER tells Django to trust the X-Forwarded-Proto header set by Render's reverse proxy
+if IS_PROD or IS_RENDER or os.getenv('SECURE_PROXY_SSL_HEADER'):
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
-CSRF_TRUSTED_ORIGINS = [
-    origin for origin in CORS_ALLOWED_ORIGINS
-    if origin.startswith('http://') or origin.startswith('https://')
-]
+csrf_trusted_env = os.getenv('CSRF_TRUSTED_ORIGINS')
+if csrf_trusted_env:
+    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_trusted_env.split(',') if origin.strip()]
+else:
+    CSRF_TRUSTED_ORIGINS = [
+        origin for origin in CORS_ALLOWED_ORIGINS
+        if origin.startswith('http://') or origin.startswith('https://')
+    ]
+
 
 
 

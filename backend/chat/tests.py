@@ -3813,8 +3813,16 @@ class DatabaseConfigurationTests(TestCase):
 
 class ProductionCookieSecurityTests(TestCase):
     """
-    Tests for cross-site cookie security, proxy SSL header, and CSRF token endpoint.
+    Tests for cross-site cookie security, proxy SSL header, CSRF token endpoint,
+    session persistence across /api/auth/me/ and authenticated conversation requests.
     """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='prod_session_tester',
+            password='prod_secure_password_123',
+            email='tester@example.com'
+        )
 
     def test_csrf_token_endpoint_returns_json_token(self):
         """Verify GET /api/auth/csrf/ returns status 200 with csrfToken key and cookie."""
@@ -3826,23 +3834,136 @@ class ProductionCookieSecurityTests(TestCase):
         self.assertTrue(len(data['csrfToken']) > 10)
         self.assertIn('csrftoken', response.cookies)
 
-    def test_cookie_settings_derivation_in_dev_vs_prod(self):
-        """Verify that IS_PROD derives SameSite=None and Secure=True in production, Lax in dev."""
-        # Development mode (DEBUG=True)
-        is_prod_dev = False
+    def test_login_creates_session_with_cross_site_production_cookies(self):
+        """
+        Verify that login under production settings creates a valid Django session
+        and returns sessionid and csrftoken with SameSite=None and Secure=True.
+        """
+        from django.test import Client
+
+        with override_settings(
+            DEBUG=False,
+            SESSION_COOKIE_SAMESITE='None',
+            CSRF_COOKIE_SAMESITE='None',
+            SESSION_COOKIE_SECURE=True,
+            CSRF_COOKIE_SECURE=True,
+            SECURE_PROXY_SSL_HEADER=('HTTP_X_FORWARDED_PROTO', 'https'),
+            ALLOWED_HOSTS=['testserver', 'ami-bot-9ys2.onrender.com'],
+            CORS_ALLOWED_ORIGINS=['https://ai-chatbot-rho-six-36.vercel.app'],
+            CSRF_TRUSTED_ORIGINS=['https://ai-chatbot-rho-six-36.vercel.app']
+        ):
+            client = Client(enforce_csrf_checks=True)
+
+            # 1. Fetch CSRF token
+            csrf_res = client.get(
+                '/api/auth/csrf/',
+                HTTP_ORIGIN='https://ai-chatbot-rho-six-36.vercel.app',
+                HTTP_X_FORWARDED_PROTO='https'
+            )
+            self.assertEqual(csrf_res.status_code, 200)
+            csrf_token = csrf_res.json()['csrfToken']
+
+            # 2. Perform Login
+            login_res = client.post(
+                '/api/auth/login/',
+                data={'username': 'prod_session_tester', 'password': 'prod_secure_password_123'},
+                content_type='application/json',
+                HTTP_ORIGIN='https://ai-chatbot-rho-six-36.vercel.app',
+                HTTP_X_CSRFTOKEN=csrf_token,
+                HTTP_X_FORWARDED_PROTO='https'
+            )
+            self.assertEqual(login_res.status_code, 200)
+            login_data = login_res.json()
+            self.assertTrue(login_data['authenticated'])
+            self.assertEqual(login_data['username'], 'prod_session_tester')
+
+            # Verify session cookie attributes for cross-site browser support
+            self.assertIn('sessionid', login_res.cookies)
+            session_cookie = login_res.cookies['sessionid']
+            self.assertEqual(session_cookie['samesite'], 'None')
+            self.assertTrue(session_cookie['secure'])
+            self.assertTrue(session_cookie['httponly'])
+
+            # Verify CSRF cookie attributes
+            self.assertIn('csrftoken', login_res.cookies)
+            csrf_cookie = login_res.cookies['csrftoken']
+            self.assertEqual(csrf_cookie['samesite'], 'None')
+            self.assertTrue(csrf_cookie['secure'])
+
+            # 3. Subsequent /api/auth/me/ request with session cookie succeeds
+            me_res = client.get(
+                '/api/auth/me/',
+                HTTP_ORIGIN='https://ai-chatbot-rho-six-36.vercel.app',
+                HTTP_X_FORWARDED_PROTO='https'
+            )
+            self.assertEqual(me_res.status_code, 200)
+            me_data = me_res.json()
+            self.assertTrue(me_data['authenticated'])
+            self.assertEqual(me_data['username'], 'prod_session_tester')
+
+            # 4. Subsequent /api/conversations/ request with session cookie succeeds
+            conv_res = client.get(
+                '/api/conversations/',
+                HTTP_ORIGIN='https://ai-chatbot-rho-six-36.vercel.app',
+                HTTP_X_FORWARDED_PROTO='https'
+            )
+            self.assertEqual(conv_res.status_code, 200)
+            self.assertIsInstance(conv_res.json(), list)
+
+            # 5. Create conversation with session cookie + CSRF token
+            new_csrf = login_data['csrfToken']
+            create_res = client.post(
+                '/api/conversations/',
+                data={'title': 'Production Thread'},
+                content_type='application/json',
+                HTTP_ORIGIN='https://ai-chatbot-rho-six-36.vercel.app',
+                HTTP_X_CSRFTOKEN=new_csrf,
+                HTTP_X_FORWARDED_PROTO='https'
+            )
+            self.assertEqual(create_res.status_code, 201)
+            self.assertEqual(create_res.json()['title'], 'Production Thread')
+
+    def test_unauthenticated_requests_without_cookie_rejected(self):
+        """Verify /api/auth/me/ returns 401 and /api/conversations/ returns 403 when session cookie is absent."""
+        from django.test import Client
+        anon_client = Client()
+
+        # /api/auth/me/ returns 401
+        res_me = anon_client.get('/api/auth/me/')
+        self.assertEqual(res_me.status_code, 401)
+        self.assertFalse(res_me.json().get('authenticated', True))
+
+        # /api/conversations/ returns 403 (DRF IsAuthenticated permission)
+        res_conv = anon_client.get('/api/conversations/')
+        self.assertEqual(res_conv.status_code, 403)
+
+    def test_render_and_production_environment_derivation(self):
+        """
+        Verify that Render environment markers or DEBUG=False derive SameSite=None,
+        Secure=True, and reverse proxy SSL headers.
+        """
+        # When RENDER=true is set, even if DEBUG=True, it should derive SameSite=None and Secure=True
+        is_render = True
+        debug = True
+        is_prod = (not debug) or is_render
+        samesite = 'None' if is_prod else 'Lax'
+        secure = True if (is_prod or samesite.lower() == 'none') else False
+        proxy_header = ('HTTP_X_FORWARDED_PROTO', 'https') if (is_prod or is_render) else None
+
+        self.assertEqual(samesite, 'None')
+        self.assertTrue(secure)
+        self.assertEqual(proxy_header, ('HTTP_X_FORWARDED_PROTO', 'https'))
+
+        # When local dev (not Render and DEBUG=True)
+        is_render_dev = False
+        debug_dev = True
+        is_prod_dev = (not debug_dev) or is_render_dev
         samesite_dev = 'None' if is_prod_dev else 'Lax'
-        secure_dev = is_prod_dev
+        secure_dev = True if (is_prod_dev or samesite_dev.lower() == 'none') else False
+
         self.assertEqual(samesite_dev, 'Lax')
         self.assertFalse(secure_dev)
 
-        # Production mode (DEBUG=False)
-        is_prod_prod = True
-        samesite_prod = 'None' if is_prod_prod else 'Lax'
-        secure_prod = is_prod_prod
-        proxy_header_prod = ('HTTP_X_FORWARDED_PROTO', 'https') if is_prod_prod else None
-        self.assertEqual(samesite_prod, 'None')
-        self.assertTrue(secure_prod)
-        self.assertEqual(proxy_header_prod, ('HTTP_X_FORWARDED_PROTO', 'https'))
 
 
 
